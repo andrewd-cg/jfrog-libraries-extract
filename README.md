@@ -33,6 +33,7 @@ jinja2==3.1.6
 - `--all-versions` - Show all cached versions (default: latest only)
 - `--output`, `-o` - Write to file instead of stdout
 - `--package` - Query specific package only
+- `--since-days` - Only show packages downloaded in the last X days
 - `--debug` - Show repository contents for troubleshooting
 
 ### Examples
@@ -40,6 +41,11 @@ jinja2==3.1.6
 Show latest version of each package:
 ```bash
 python3 extract_jfrog_python.py --url <URL> --username <USER> --password <PASS>
+```
+
+Show packages downloaded in the last 30 days:
+```bash
+python3 extract_jfrog_python.py --url <URL> -u <USER> -p <PASS> --since-days 30 -o recent-packages.txt
 ```
 
 Check all cached Flask versions:
@@ -96,6 +102,7 @@ implementation 'org.springframework:spring-core:5.3.1'
 - `--output`, `-o` - Write to file instead of stdout
 - `--package` - Query specific artifactId only
 - `--format` - Output format: `simple`, `maven`, or `gradle` (default: simple)
+- `--since-days` - Only show packages downloaded in the last X days
 - `--debug` - Show repository contents for troubleshooting
 
 ### Examples
@@ -103,6 +110,11 @@ implementation 'org.springframework:spring-core:5.3.1'
 Show latest version of each package:
 ```bash
 python3 extract_jfrog_maven.py --url <URL> --username <USER> --password <PASS>
+```
+
+Show packages downloaded in the last 30 days:
+```bash
+python3 extract_jfrog_maven.py --url <URL> -u <USER> -p <PASS> --since-days 30 -o recent-maven.txt
 ```
 
 Check all cached Spring Core versions:
@@ -168,6 +180,7 @@ package.json format (`--format package-json`):
 - `--output`, `-o` - Write to file instead of stdout
 - `--package` - Query specific package only
 - `--format` - Output format: `simple`, `npm`, or `package-json` (default: simple)
+- `--since-days` - Only show packages downloaded in the last X days
 - `--debug` - Show repository contents for troubleshooting
 
 ### Examples
@@ -175,6 +188,11 @@ package.json format (`--format package-json`):
 Show latest version of each package:
 ```bash
 python3 extract_jfrog_npm.py --url <URL> --username <USER> --password <PASS>
+```
+
+Show packages downloaded in the last 30 days:
+```bash
+python3 extract_jfrog_npm.py --url <URL> -u <USER> -p <PASS> --since-days 30 -o recent-npm.txt
 ```
 
 Check all cached Express versions:

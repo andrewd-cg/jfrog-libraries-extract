@@ -9,6 +9,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime, timedelta
 from typing import Dict, Set, Tuple
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
@@ -130,20 +131,34 @@ def parse_maven_path(path: str, filename: str) -> Tuple[str, str, str]:
     return group_id, artifact_id, version
 
 
-def get_cached_maven_packages(base_url: str, repo_name: str, auth: Tuple[str, str] = None, debug: bool = False) -> Dict[Tuple[str, str], Set[str]]:
+def get_cached_maven_packages(base_url: str, repo_name: str, auth: Tuple[str, str] = None, debug: bool = False, since_days: int = None) -> Dict[Tuple[str, str], Set[str]]:
     """
     Use JFrog AQL to query only cached Maven artifacts in the repository.
     Returns a dict mapping (groupId, artifactId) to sets of versions.
+    If since_days is provided, only returns packages downloaded in the last X days.
     """
     aql_url = f"{base_url}/api/search/aql"
 
+    # Build the query conditions
     if debug:
         # In debug mode, get ALL items to see what's in the repo
-        aql_query = f'items.find({{"repo": "{repo_name}"}}).include("name", "path", "repo", "type").limit(100)'
+        aql_query = f'items.find({{"repo": "{repo_name}"}}).include("name", "path", "repo", "type", "stat.downloaded").limit(100)'
         print(f"DEBUG MODE: Showing first 100 items in repository", file=sys.stderr)
     else:
-        # AQL query to find all Maven artifacts (.jar and .pom files)
-        aql_query = f'items.find({{"repo": "{repo_name}", "$or": [{{"name": {{"$match": "*.jar"}}}}, {{"name": {{"$match": "*.pom"}}}}]}}).include("name", "path", "repo")'
+        # Build file type condition
+        file_condition = '"$or": [{"name": {"$match": "*.jar"}}, {"name": {"$match": "*.pom"}}]'
+
+        # Add date filter if requested
+        if since_days:
+            from datetime import timezone
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=since_days)
+            # JFrog uses ISO 8601 format: YYYY-MM-DDTHH:MM:SS.sssZ
+            cutoff_str = cutoff_date.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+            aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}, "stat.downloaded": {{"$gte": "{cutoff_str}"}}}}).include("name", "path", "repo", "stat.downloaded")'
+            print(f"Filtering packages downloaded since {cutoff_str} ({since_days} days ago)", file=sys.stderr)
+        else:
+            # AQL query to find all Maven artifacts (.jar and .pom files)
+            aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}}}).include("name", "path", "repo")'
 
     print(f"Querying cached artifacts in {repo_name}...", file=sys.stderr)
     if debug:
@@ -172,7 +187,9 @@ def get_cached_maven_packages(base_url: str, repo_name: str, auth: Tuple[str, st
             item_type = item.get('type', 'unknown')
             path = item.get('path', '')
             name = item.get('name', '')
-            print(f"  [{item_type}] {path}/{name}", file=sys.stderr)
+            stats = item.get('stats', [])
+            downloaded = stats[0].get('downloaded') if stats else 'N/A'
+            print(f"  [{item_type}] {path}/{name} (downloaded: {downloaded})", file=sys.stderr)
         print(file=sys.stderr)
 
     # Parse results and group by (groupId, artifactId)
@@ -263,6 +280,12 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
         help='Output format: simple (groupId:artifactId:version), maven (XML), gradle (Gradle syntax)'
     )
 
+    parser.add_argument(
+        '--since-days',
+        type=int,
+        help='Only show packages downloaded in the last X days'
+    )
+
     args = parser.parse_args()
 
     auth = None
@@ -286,7 +309,7 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
         sys.exit(1)
 
     # Get cached packages using AQL
-    packages = get_cached_maven_packages(base_url, actual_repo_name, auth, debug=args.debug)
+    packages = get_cached_maven_packages(base_url, actual_repo_name, auth, debug=args.debug, since_days=args.since_days)
 
     if not packages:
         if args.debug:
