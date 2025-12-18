@@ -6,11 +6,12 @@ Output format: package@version
 """
 
 import argparse
+import csv
 import json
 import re
 import sys
 from datetime import datetime, timedelta
-from typing import Dict, Set, Tuple
+from typing import Dict, Set, Tuple, List, Optional, Union
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
@@ -140,22 +141,29 @@ def parse_npm_filename(filename: str) -> Tuple[str, str]:
     return None, None
 
 
-def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str] = None, debug: bool = False, since_days: int = None) -> Dict[str, Set[str]]:
+def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str] = None, debug: bool = False, since_days: int = None, include_stats: bool = False) -> Union[Dict[str, Set[str]], Dict[str, List[Tuple[str, str, int]]]]:
     """
     Use JFrog AQL to query only cached npm artifacts in the repository.
-    Returns a dict mapping package names to sets of versions.
+    Returns a dict mapping package names to sets of versions (or version tuples with stats).
     If since_days is provided, only returns packages downloaded in the last X days.
+    If include_stats is True, returns dict mapping package names to list of (version, last_downloaded, download_count) tuples.
     """
     aql_url = f"{base_url}/api/search/aql"
 
     # Build the query conditions
     if debug:
         # In debug mode, get ALL items to see what's in the repo
-        aql_query = f'items.find({{"repo": "{repo_name}"}}).include("name", "path", "repo", "type", "stat.downloaded").limit(100)'
+        aql_query = f'items.find({{"repo": "{repo_name}"}}).include("name", "path", "repo", "type", "stat.downloaded", "stat.downloads").limit(100)'
         print(f"DEBUG MODE: Showing first 100 items in repository", file=sys.stderr)
     else:
         # Build file type condition for npm tarballs
         file_condition = '"name": {"$match": "*.tgz"}'
+
+        # Determine what stats to include
+        if include_stats or since_days:
+            stats_include = ', "stat.downloaded", "stat.downloads"'
+        else:
+            stats_include = ''
 
         # Add date filter if requested
         if since_days:
@@ -163,11 +171,11 @@ def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str]
             cutoff_date = datetime.now(timezone.utc) - timedelta(days=since_days)
             # JFrog uses ISO 8601 format: YYYY-MM-DDTHH:MM:SS.sssZ
             cutoff_str = cutoff_date.strftime('%Y-%m-%dT%H:%M:%S.000Z')
-            aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}, "stat.downloaded": {{"$gte": "{cutoff_str}"}}}}).include("name", "path", "repo", "stat.downloaded")'
+            aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}, "stat.downloaded": {{"$gte": "{cutoff_str}"}}}}).include("name", "path", "repo"{stats_include})'
             print(f"Filtering packages downloaded since {cutoff_str} ({since_days} days ago)", file=sys.stderr)
         else:
             # AQL query to find all npm tarballs (.tgz files)
-            aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}}}).include("name", "path", "repo")'
+            aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}}}).include("name", "path", "repo"{stats_include})'
 
     print(f"Querying cached artifacts in {repo_name}...", file=sys.stderr)
     if debug:
@@ -220,10 +228,21 @@ def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str]
                 print(f"DEBUG: Could not parse npm package from: {path}/{filename}", file=sys.stderr)
             continue
 
-        # Add to packages dict
-        if package_name not in packages:
-            packages[package_name] = set()
-        packages[package_name].add(version)
+        # Extract stats if requested
+        if include_stats:
+            stats = item.get('stats', [])
+            last_downloaded = stats[0].get('downloaded', 'Never') if stats else 'Never'
+            download_count = stats[0].get('downloads', 0) if stats else 0
+
+            # Add to packages dict with stats
+            if package_name not in packages:
+                packages[package_name] = []
+            packages[package_name].append((version, last_downloaded, download_count))
+        else:
+            # Add to packages dict without stats
+            if package_name not in packages:
+                packages[package_name] = set()
+            packages[package_name].add(version)
 
     return packages
 
@@ -317,6 +336,11 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
         help='Only show packages downloaded in the last X days'
     )
 
+    parser.add_argument(
+        '--csv-output',
+        help='Output CSV file with download statistics (package, version, package_version, last_downloaded, download_count)'
+    )
+
     args = parser.parse_args()
 
     auth = None
@@ -340,7 +364,11 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
         sys.exit(1)
 
     # Get cached packages using AQL
-    packages = get_cached_npm_packages(base_url, actual_repo_name, auth, debug=args.debug, since_days=args.since_days)
+    # Include stats if CSV output is requested
+    include_stats = bool(args.csv_output)
+    # Only apply since_days filter in AQL if NOT using CSV output (CSV gets all packages)
+    aql_since_days = None if args.csv_output else args.since_days
+    packages = get_cached_npm_packages(base_url, actual_repo_name, auth, debug=args.debug, since_days=aql_since_days, include_stats=include_stats)
 
     if not packages:
         if args.debug:
@@ -368,12 +396,62 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
             sys.exit(1)
         packages = filtered
 
+    # Handle CSV output (with statistics)
+    if args.csv_output and not args.debug:
+        try:
+            with open(args.csv_output, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['package', 'version', 'package_version', 'last_downloaded', 'download_count'])
+
+                csv_rows = []
+                for package_name in sorted(packages.keys()):
+                    version_stats = packages[package_name]  # List of (version, last_downloaded, download_count) tuples
+                    for version, last_downloaded, download_count in version_stats:
+                        package_version = f"{package_name}@{version}"
+                        csv_rows.append([package_name, version, package_version, last_downloaded, download_count])
+
+                # Sort by package, then version
+                csv_rows.sort(key=lambda x: (x[0], x[1]))
+                writer.writerows(csv_rows)
+
+            print(f"Successfully wrote {len(csv_rows)} package-version entries to {args.csv_output}", file=sys.stderr)
+        except Exception as e:
+            print(f"Error writing CSV file {args.csv_output}: {e}", file=sys.stderr)
+            sys.exit(1)
+
     # Generate output
-    if not args.debug:
+    if not args.debug and (args.output or not args.csv_output):
         results = []
 
+        # If since_days is used with CSV output, we need to filter here
+        cutoff_date_str = None
+        if args.since_days and args.csv_output:
+            from datetime import timezone
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=args.since_days)
+            cutoff_date_str = cutoff_date.isoformat()
+
         for package_name in sorted(packages.keys()):
-            versions = packages[package_name]
+            version_data = packages[package_name]
+
+            # Handle both data structures: set of strings or list of tuples
+            if include_stats:
+                # Extract versions from tuples (version, last_downloaded, download_count)
+                # Apply date filter if needed
+                if cutoff_date_str:
+                    # Filter by date for text output
+                    filtered_versions = [
+                        (v, dl, dc) for v, dl, dc in version_data
+                        if dl != 'Never' and dl >= cutoff_date_str
+                    ]
+                    versions = set(v[0] for v in filtered_versions)
+                else:
+                    versions = set(v[0] for v in version_data)
+            else:
+                versions = version_data
+
+            # Skip if no versions match the filter
+            if not versions:
+                continue
 
             if args.all_versions:
                 for version in sorted(versions):
@@ -418,27 +496,28 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
                 print(f"Error writing to file {args.output}: {e}", file=sys.stderr)
                 sys.exit(1)
         else:
-            # Write to stdout
-            print("# Cached npm packages and versions:", file=sys.stderr)
-            print(file=sys.stderr)
+            # Write to stdout (only if no CSV output)
+            if not args.csv_output:
+                print("# Cached npm packages and versions:", file=sys.stderr)
+                print(file=sys.stderr)
 
-            if args.format == 'package-json':
-                print('{')
-                print('  "dependencies": {')
-            for i, result in enumerate(results):
                 if args.format == 'package-json':
-                    if i < len(results) - 1:
-                        print(result + ',')
+                    print('{')
+                    print('  "dependencies": {')
+                for i, result in enumerate(results):
+                    if args.format == 'package-json':
+                        if i < len(results) - 1:
+                            print(result + ',')
+                        else:
+                            print(result)
                     else:
                         print(result)
-                else:
-                    print(result)
-            if args.format == 'package-json':
-                print('  }')
-                print('}')
+                if args.format == 'package-json':
+                    print('  }')
+                    print('}')
 
-            print(file=sys.stderr)
-            print(f"Total: {len(results)} package version{'s' if len(results) != 1 else ''}", file=sys.stderr)
+                print(file=sys.stderr)
+                print(f"Total: {len(results)} package version{'s' if len(results) != 1 else ''}", file=sys.stderr)
 
 
 if __name__ == '__main__':

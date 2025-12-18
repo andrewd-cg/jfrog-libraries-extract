@@ -6,11 +6,12 @@ Output format: groupId:artifactId:version
 """
 
 import argparse
+import csv
 import json
 import re
 import sys
 from datetime import datetime, timedelta
-from typing import Dict, Set, Tuple
+from typing import Dict, Set, Tuple, List, Optional
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
@@ -131,22 +132,29 @@ def parse_maven_path(path: str, filename: str) -> Tuple[str, str, str]:
     return group_id, artifact_id, version
 
 
-def get_cached_maven_packages(base_url: str, repo_name: str, auth: Tuple[str, str] = None, debug: bool = False, since_days: int = None) -> Dict[Tuple[str, str], Set[str]]:
+def get_cached_maven_packages(base_url: str, repo_name: str, auth: Tuple[str, str] = None, debug: bool = False, since_days: int = None, include_stats: bool = False):
     """
     Use JFrog AQL to query only cached Maven artifacts in the repository.
-    Returns a dict mapping (groupId, artifactId) to sets of versions.
+    Returns a dict mapping (groupId, artifactId) to sets of versions (or version tuples with stats).
     If since_days is provided, only returns packages downloaded in the last X days.
+    If include_stats is True, returns dict mapping (groupId, artifactId) to list of (version, last_downloaded, download_count) tuples.
     """
     aql_url = f"{base_url}/api/search/aql"
 
     # Build the query conditions
     if debug:
         # In debug mode, get ALL items to see what's in the repo
-        aql_query = f'items.find({{"repo": "{repo_name}"}}).include("name", "path", "repo", "type", "stat.downloaded").limit(100)'
+        aql_query = f'items.find({{"repo": "{repo_name}"}}).include("name", "path", "repo", "type", "stat.downloaded", "stat.downloads").limit(100)'
         print(f"DEBUG MODE: Showing first 100 items in repository", file=sys.stderr)
     else:
         # Build file type condition
         file_condition = '"$or": [{"name": {"$match": "*.jar"}}, {"name": {"$match": "*.pom"}}]'
+
+        # Determine what stats to include
+        if include_stats or since_days:
+            stats_include = ', "stat.downloaded", "stat.downloads"'
+        else:
+            stats_include = ''
 
         # Add date filter if requested
         if since_days:
@@ -154,11 +162,11 @@ def get_cached_maven_packages(base_url: str, repo_name: str, auth: Tuple[str, st
             cutoff_date = datetime.now(timezone.utc) - timedelta(days=since_days)
             # JFrog uses ISO 8601 format: YYYY-MM-DDTHH:MM:SS.sssZ
             cutoff_str = cutoff_date.strftime('%Y-%m-%dT%H:%M:%S.000Z')
-            aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}, "stat.downloaded": {{"$gte": "{cutoff_str}"}}}}).include("name", "path", "repo", "stat.downloaded")'
+            aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}, "stat.downloaded": {{"$gte": "{cutoff_str}"}}}}).include("name", "path", "repo"{stats_include})'
             print(f"Filtering packages downloaded since {cutoff_str} ({since_days} days ago)", file=sys.stderr)
         else:
             # AQL query to find all Maven artifacts (.jar and .pom files)
-            aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}}}).include("name", "path", "repo")'
+            aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}}}).include("name", "path", "repo"{stats_include})'
 
     print(f"Querying cached artifacts in {repo_name}...", file=sys.stderr)
     if debug:
@@ -211,11 +219,23 @@ def get_cached_maven_packages(base_url: str, repo_name: str, auth: Tuple[str, st
                 print(f"DEBUG: Could not parse Maven coordinates from: {path}/{filename}", file=sys.stderr)
             continue
 
-        # Add to packages dict
-        key = (group_id, artifact_id)
-        if key not in packages:
-            packages[key] = set()
-        packages[key].add(version)
+        # Extract stats if requested
+        if include_stats:
+            stats = item.get('stats', [])
+            last_downloaded = stats[0].get('downloaded', 'Never') if stats else 'Never'
+            download_count = stats[0].get('downloads', 0) if stats else 0
+
+            # Add to packages dict with stats
+            key = (group_id, artifact_id)
+            if key not in packages:
+                packages[key] = []
+            packages[key].append((version, last_downloaded, download_count))
+        else:
+            # Add to packages dict without stats
+            key = (group_id, artifact_id)
+            if key not in packages:
+                packages[key] = set()
+            packages[key].add(version)
 
     return packages
 
@@ -286,6 +306,11 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
         help='Only show packages downloaded in the last X days'
     )
 
+    parser.add_argument(
+        '--csv-output',
+        help='Output CSV file with download statistics (groupId, artifactId, version, package_version, last_downloaded, download_count)'
+    )
+
     args = parser.parse_args()
 
     auth = None
@@ -309,7 +334,11 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
         sys.exit(1)
 
     # Get cached packages using AQL
-    packages = get_cached_maven_packages(base_url, actual_repo_name, auth, debug=args.debug, since_days=args.since_days)
+    # Include stats if CSV output is requested
+    include_stats = bool(args.csv_output)
+    # Only apply since_days filter in AQL if NOT using CSV output (CSV gets all packages)
+    aql_since_days = None if args.csv_output else args.since_days
+    packages = get_cached_maven_packages(base_url, actual_repo_name, auth, debug=args.debug, since_days=aql_since_days, include_stats=include_stats)
 
     if not packages:
         if args.debug:
@@ -335,12 +364,62 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
             sys.exit(1)
         packages = filtered
 
+    # Handle CSV output (with statistics)
+    if args.csv_output and not args.debug:
+        try:
+            with open(args.csv_output, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['groupId', 'artifactId', 'version', 'package_version', 'last_downloaded', 'download_count'])
+
+                csv_rows = []
+                for (group_id, artifact_id) in sorted(packages.keys()):
+                    version_stats = packages[(group_id, artifact_id)]  # List of (version, last_downloaded, download_count) tuples
+                    for version, last_downloaded, download_count in version_stats:
+                        package_version = f"{group_id}:{artifact_id}:{version}"
+                        csv_rows.append([group_id, artifact_id, version, package_version, last_downloaded, download_count])
+
+                # Sort by groupId:artifactId, then version
+                csv_rows.sort(key=lambda x: (x[0], x[1], x[2]))
+                writer.writerows(csv_rows)
+
+            print(f"Successfully wrote {len(csv_rows)} package-version entries to {args.csv_output}", file=sys.stderr)
+        except Exception as e:
+            print(f"Error writing CSV file {args.csv_output}: {e}", file=sys.stderr)
+            sys.exit(1)
+
     # Generate output
-    if not args.debug:
+    if not args.debug and (args.output or not args.csv_output):
         results = []
 
+        # If since_days is used with CSV output, we need to filter here
+        cutoff_date_str = None
+        if args.since_days and args.csv_output:
+            from datetime import timezone
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=args.since_days)
+            cutoff_date_str = cutoff_date.isoformat()
+
         for (group_id, artifact_id) in sorted(packages.keys()):
-            versions = packages[(group_id, artifact_id)]
+            version_data = packages[(group_id, artifact_id)]
+
+            # Handle both data structures: set of strings or list of tuples
+            if include_stats:
+                # Extract versions from tuples (version, last_downloaded, download_count)
+                # Apply date filter if needed
+                if cutoff_date_str:
+                    # Filter by date for text output
+                    filtered_versions = [
+                        (v, dl, dc) for v, dl, dc in version_data
+                        if dl != 'Never' and dl >= cutoff_date_str
+                    ]
+                    versions = set(v[0] for v in filtered_versions)
+                else:
+                    versions = set(v[0] for v in version_data)
+            else:
+                versions = version_data
+
+            # Skip if no versions match the filter
+            if not versions:
+                continue
 
             if args.all_versions:
                 for version in sorted(versions):
@@ -372,15 +451,16 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
                 print(f"Error writing to file {args.output}: {e}", file=sys.stderr)
                 sys.exit(1)
         else:
-            # Write to stdout
-            print("# Cached Maven packages and versions:", file=sys.stderr)
-            print(file=sys.stderr)
+            # Write to stdout (only if no CSV output)
+            if not args.csv_output:
+                print("# Cached Maven packages and versions:", file=sys.stderr)
+                print(file=sys.stderr)
 
-            for result in results:
-                print(result)
+                for result in results:
+                    print(result)
 
-            print(file=sys.stderr)
-            print(f"Total: {len(results)} package version{'s' if len(results) != 1 else ''}", file=sys.stderr)
+                print(file=sys.stderr)
+                print(f"Total: {len(results)} package version{'s' if len(results) != 1 else ''}", file=sys.stderr)
 
 
 if __name__ == '__main__':
