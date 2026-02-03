@@ -11,7 +11,7 @@ import json
 import re
 import sys
 from datetime import datetime, timedelta
-from typing import Dict, Set, Tuple, List, Optional, Union
+from typing import Dict, Set, Tuple, Union
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 

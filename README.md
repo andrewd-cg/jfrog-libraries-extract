@@ -222,6 +222,8 @@ lodash,4.17.21,lodash@4.17.21,2025-12-17T14:22:33.789Z,28
 @types/node,18.11.9,@types/node@18.11.9,2025-12-16T12:45:11.234Z,35
 ```
 
+**Note**: JFrog stores npm packages in multiple formats (tarball + metadata). The script automatically deduplicates entries, keeping the one with the most downloads.
+
 ### Options
 
 - `--url` - JFrog Artifactory npm repository URL (required)
@@ -262,6 +264,11 @@ python3 extract_jfrog_npm.py --url <URL> -u <USER> -p <PASS> --since-days 30 --o
 Check all cached Express versions:
 ```bash
 python3 extract_jfrog_npm.py --url <URL> -u <USER> -p <PASS> --package express --all-versions
+```
+
+Check scoped package versions (e.g., @types/node):
+```bash
+python3 extract_jfrog_npm.py --url <URL> -u <USER> -p <PASS> --package @types/node --all-versions
 ```
 
 Generate package.json dependencies:
