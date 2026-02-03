@@ -99,54 +99,100 @@ def get_actual_repo_name(base_url: str, repo_name: str, auth: Tuple[str, str] = 
     return repo_name
 
 
-def parse_npm_filename(filename: str) -> Tuple[str, str]:
+def parse_npm_metadata(path: str, filename: str) -> Tuple[str, str]:
     """
-    Extract package name and version from npm tarball filename.
+    Extract package name and version from npm files in JFrog.
 
-    npm tarballs: package-version.tgz or @scope-package-version.tgz
+    JFrog stores npm packages in two formats:
+    1. Metadata: .npm/{package}/ with package.json and {package}-{version}.json
+    2. Tarballs: {hash}/{hash}/{package}/-/{package}-{version}.tgz (content-addressable storage)
+
     Examples:
-        express-4.18.2.tgz -> (express, 4.18.2)
-        @types-node-18.11.9.tgz -> (@types/node, 18.11.9)
-        lodash-4.17.21.tgz -> (lodash, 4.17.21)
+        path: .npm/express/, filename: express-4.18.2.json -> (express, 4.18.2)
+        path: .npm/@types/node/, filename: @types-node-18.11.9.json -> (@types/node, 18.11.9)
+        path: hash/hash/express/-/, filename: express-4.18.2.tgz -> (express, 4.18.2)
+        path: hash/hash/@babel/core/-/, filename: @babel-core-7.23.0.tgz -> (@babel/core, 7.23.0)
 
     Returns: (package_name, version)
     """
-    if not filename.endswith('.tgz'):
+    # Skip package.json files (they don't have version info)
+    if filename == 'package.json':
         return None, None
 
-    # Remove .tgz extension
-    name_without_ext = filename[:-4]
+    # Process both .json metadata and .tgz tarballs
+    if filename.endswith('.json'):
+        name_without_ext = filename[:-5]
+    elif filename.endswith('.tgz'):
+        name_without_ext = filename[:-4]
+    else:
+        return None, None
 
-    # Handle scoped packages: @scope-package-version.tgz
-    if name_without_ext.startswith('@'):
-        # Pattern: @scope-package-version
-        # Need to find where the version starts (last occurrence of -\d)
-        match = re.match(r'^(@[^-]+)-(.+)-(\d+.*)$', name_without_ext)
-        if match:
-            scope = match.group(1)
-            package = match.group(2)
-            version = match.group(3)
-            # Reconstruct scoped package name: @scope/package
-            package_name = f"{scope}/{package}"
-            return package_name, version
+    # Extract package name from path
+    path_parts = path.strip('/').split('/')
 
-    # Handle unscoped packages: package-version.tgz
-    # Find the last dash followed by a digit (start of version)
-    match = re.match(r'^(.+?)-(\d+.*)$', name_without_ext)
+    if len(path_parts) < 2:
+        return None, None
+
+    # Detect storage format
+    # Format 1: .npm/{package}/ or .npm/@scope/package/
+    # Format 2: {hash}/{hash}/{package}/-/ or {hash}/{hash}/@scope/package/-/
+
+    if path_parts[0] == '.npm':
+        # Metadata format: .npm/{package}/ or .npm/@scope/package/
+        if len(path_parts) >= 3 and path_parts[1].startswith('@'):
+            # Scoped package: .npm/@scope/package/
+            scope = path_parts[1]  # @scope
+            package_name_from_path = path_parts[2]  # package
+            package_name = f"{scope}/{package_name_from_path}"
+        else:
+            # Unscoped package: .npm/{package}/
+            package_name = path_parts[1]
+    else:
+        # Content-addressable format: {hash}/{hash}/{package}/-/
+        # Find the package name (it's the part before '/-/')
+        if '/-' in path or (len(path_parts) >= 3 and path_parts[-1] == '-'):
+            # Package name is 3rd path component
+            package_name_candidate = path_parts[2] if len(path_parts) >= 3 else None
+            if not package_name_candidate:
+                return None, None
+
+            # Check if it's a scoped package (starts with @)
+            if package_name_candidate.startswith('@'):
+                # Scoped package: hash/hash/@scope/package/-/
+                if len(path_parts) >= 4:
+                    scope = path_parts[2]  # @scope
+                    package_name_from_path = path_parts[3]  # package (before -/)
+                    package_name = f"{scope}/{package_name_from_path}"
+                else:
+                    return None, None
+            else:
+                # Unscoped package
+                package_name = package_name_candidate
+        else:
+            return None, None
+
+    # Extract version from filename: {package}-{version}
+    # Handle both unscoped and scoped packages
+    # For scoped packages, filename is @scope-package-version, but we need just the version
+
+    # Try to match: {anything}-{version} where version starts with digit
+    match = re.match(r'^(.+?)-(\d+[\d\.\-\w]*)$', name_without_ext)
     if match:
-        package_name = match.group(1)
         version = match.group(2)
-        return package_name, version
+        # Validate version looks reasonable
+        if version and version[0].isdigit():
+            return package_name, version
 
     return None, None
 
 
-def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str] = None, debug: bool = False, since_days: int = None, include_stats: bool = False) -> Union[Dict[str, Set[str]], Dict[str, List[Tuple[str, str, int]]]]:
+def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str] = None, debug: bool = False, since_days: int = None, include_stats: bool = False) -> Union[Dict[str, Set[str]], Dict[str, Dict[str, Tuple[str, int]]]]:
     """
     Use JFrog AQL to query only cached npm artifacts in the repository.
-    Returns a dict mapping package names to sets of versions (or version tuples with stats).
+    Returns a dict mapping package names to sets of versions (or version stats dict).
     If since_days is provided, only returns packages downloaded in the last X days.
-    If include_stats is True, returns dict mapping package names to list of (version, last_downloaded, download_count) tuples.
+    If include_stats is True, returns dict mapping package names to dict of {version: (last_downloaded, download_count)}.
+    Deduplicates entries with the same package+version, keeping the one with most downloads.
     """
     aql_url = f"{base_url}/api/search/aql"
 
@@ -156,8 +202,9 @@ def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str]
         aql_query = f'items.find({{"repo": "{repo_name}"}}).include("name", "path", "repo", "type", "stat.downloaded", "stat.downloads").limit(100)'
         print(f"DEBUG MODE: Showing first 100 items in repository", file=sys.stderr)
     else:
-        # Build file type condition for npm tarballs
-        file_condition = '"name": {"$match": "*.tgz"}'
+        # Build file type condition for npm files (.json metadata and .tgz tarballs)
+        # JFrog stores npm packages in both formats
+        file_condition = '"$or": [{"name": {"$match": "*.json"}}, {"name": {"$match": "*.tgz"}}]'
 
         # Determine what stats to include
         if include_stats or since_days:
@@ -174,7 +221,7 @@ def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str]
             aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}, "stat.downloaded": {{"$gte": "{cutoff_str}"}}}}).include("name", "path", "repo"{stats_include})'
             print(f"Filtering packages downloaded since {cutoff_str} ({since_days} days ago)", file=sys.stderr)
         else:
-            # AQL query to find all npm tarballs (.tgz files)
+            # AQL query to find all npm files (.json metadata and .tgz tarballs)
             aql_query = f'items.find({{"repo": "{repo_name}", {file_condition}}}).include("name", "path", "repo"{stats_include})'
 
     print(f"Querying cached artifacts in {repo_name}...", file=sys.stderr)
@@ -220,8 +267,8 @@ def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str]
         if item.get('type') == 'folder':
             continue
 
-        # Extract package name and version
-        package_name, version = parse_npm_filename(filename)
+        # Extract package name and version from path and filename
+        package_name, version = parse_npm_metadata(path, filename)
 
         if not package_name or not version:
             if debug:
@@ -235,9 +282,19 @@ def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str]
             download_count = stats[0].get('downloads', 0) if stats else 0
 
             # Add to packages dict with stats
+            # Use a dict to deduplicate: {(package, version): (last_downloaded, download_count)}
+            # Keep the entry with the highest download count
             if package_name not in packages:
-                packages[package_name] = []
-            packages[package_name].append((version, last_downloaded, download_count))
+                packages[package_name] = {}
+
+            # Deduplicate: if version exists, keep the one with more downloads
+            if version in packages[package_name]:
+                existing_dl, existing_count = packages[package_name][version]
+                # Keep the entry with higher download count, or if equal, the one with a real download date
+                if download_count > existing_count or (download_count == existing_count and last_downloaded != 'Never' and existing_dl == 'Never'):
+                    packages[package_name][version] = (last_downloaded, download_count)
+            else:
+                packages[package_name][version] = (last_downloaded, download_count)
         else:
             # Add to packages dict without stats
             if package_name not in packages:
@@ -405,8 +462,8 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
 
                 csv_rows = []
                 for package_name in sorted(packages.keys()):
-                    version_stats = packages[package_name]  # List of (version, last_downloaded, download_count) tuples
-                    for version, last_downloaded, download_count in version_stats:
+                    version_stats = packages[package_name]  # Dict of {version: (last_downloaded, download_count)}
+                    for version, (last_downloaded, download_count) in version_stats.items():
                         package_version = f"{package_name}@{version}"
                         csv_rows.append([package_name, version, package_version, last_downloaded, download_count])
 
@@ -433,19 +490,18 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
         for package_name in sorted(packages.keys()):
             version_data = packages[package_name]
 
-            # Handle both data structures: set of strings or list of tuples
+            # Handle both data structures: set of strings or dict of version stats
             if include_stats:
-                # Extract versions from tuples (version, last_downloaded, download_count)
+                # Extract versions from dict {version: (last_downloaded, download_count)}
                 # Apply date filter if needed
                 if cutoff_date_str:
                     # Filter by date for text output
-                    filtered_versions = [
-                        (v, dl, dc) for v, dl, dc in version_data
+                    versions = set(
+                        v for v, (dl, dc) in version_data.items()
                         if dl != 'Never' and dl >= cutoff_date_str
-                    ]
-                    versions = set(v[0] for v in filtered_versions)
+                    )
                 else:
-                    versions = set(v[0] for v in version_data)
+                    versions = set(version_data.keys())
             else:
                 versions = version_data
 
