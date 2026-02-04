@@ -216,13 +216,16 @@ package.json format (`--format package-json`):
 
 **CSV output format** (with `--csv-output`):
 ```csv
-package,version,package_version,last_downloaded,download_count
-express,4.18.2,express@4.18.2,2025-12-15T10:30:45.123Z,42
-lodash,4.17.21,lodash@4.17.21,2025-12-17T14:22:33.789Z,28
-@types/node,18.11.9,@types/node@18.11.9,2025-12-16T12:45:11.234Z,35
+package,version,package_version,created,last_downloaded,download_count
+express,4.18.2,express@4.18.2,2025-12-10T08:15:20.456Z,2025-12-15T10:30:45.123Z,42
+lodash,4.17.21,lodash@4.17.21,2025-12-12T09:22:10.789Z,2025-12-17T14:22:33.789Z,28
+@types/node,18.11.9,@types/node@18.11.9,2025-12-11T11:30:05.234Z,2025-12-16T12:45:11.234Z,35
 ```
 
-**Note**: JFrog stores npm packages in multiple formats (tarball + metadata). The script automatically deduplicates entries, keeping the one with the most downloads.
+**Notes**:
+- JFrog stores npm packages in multiple formats (tarball + metadata). The script automatically deduplicates entries, keeping the one with the most downloads.
+- `created` shows when the artifact was first uploaded to JFrog (artifact creation date)
+- `last_downloaded` shows when the artifact was most recently downloaded from JFrog
 
 ### Options
 
@@ -231,7 +234,7 @@ lodash,4.17.21,lodash@4.17.21,2025-12-17T14:22:33.789Z,28
 - `--password` - Authentication password
 - `--all-versions` - Show all cached versions (default: latest only)
 - `--output`, `-o` - Write to file instead of stdout (simple text format)
-- `--csv-output` - Write CSV file with download statistics (package, version, package_version, last_downloaded, download_count). **Always exports ALL packages regardless of `--since-days`**
+- `--csv-output` - Write CSV file with download statistics (package, version, package_version, created, last_downloaded, download_count). **Always exports ALL packages regardless of `--since-days`**
 - `--package` - Query specific package only
 - `--format` - Output format: `simple`, `npm`, or `package-json` (default: simple)
 - `--since-days` - Filter packages downloaded in the last X days (applies to `--output` only; `--csv-output` always shows all packages)

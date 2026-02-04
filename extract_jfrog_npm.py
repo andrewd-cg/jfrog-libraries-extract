@@ -217,12 +217,12 @@ def parse_npm_metadata(path: str, filename: str) -> Tuple[str, str]:
     return None, None
 
 
-def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str] = None, debug: bool = False, since_days: int = None, include_stats: bool = False) -> Union[Dict[str, Set[str]], Dict[str, Dict[str, Tuple[str, int]]]]:
+def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str] = None, debug: bool = False, since_days: int = None, include_stats: bool = False) -> Union[Dict[str, Set[str]], Dict[str, Dict[str, Tuple[str, str, int]]]]:
     """
     Use JFrog AQL to query only cached npm artifacts in the repository.
     Returns a dict mapping package names to sets of versions (or version stats dict).
     If since_days is provided, only returns packages downloaded in the last X days.
-    If include_stats is True, returns dict mapping package names to dict of {version: (last_downloaded, download_count)}.
+    If include_stats is True, returns dict mapping package names to dict of {version: (created, last_downloaded, download_count)}.
     Deduplicates entries with the same package+version, keeping the one with most downloads.
     """
     aql_url = f"{base_url}/api/search/aql"
@@ -230,7 +230,7 @@ def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str]
     # Build the query conditions
     if debug:
         # In debug mode, get ALL items to see what's in the repo
-        aql_query = f'items.find({{"repo": "{repo_name}"}}).include("name", "path", "repo", "type", "stat.downloaded", "stat.downloads").limit(100)'
+        aql_query = f'items.find({{"repo": "{repo_name}"}}).include("name", "path", "repo", "type", "created", "stat.downloaded", "stat.downloads").limit(100)'
         print(f"DEBUG MODE: Showing first 100 items in repository", file=sys.stderr)
     else:
         # Build file type condition for npm files (.json metadata and .tgz tarballs)
@@ -239,7 +239,7 @@ def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str]
 
         # Determine what stats to include
         if include_stats or since_days:
-            stats_include = ', "stat.downloaded", "stat.downloads"'
+            stats_include = ', "created", "stat.downloaded", "stat.downloads"'
         else:
             stats_include = ''
 
@@ -313,20 +313,23 @@ def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str]
             last_downloaded = stats[0].get('downloaded', 'Never') if stats else 'Never'
             download_count = stats[0].get('downloads', 0) if stats else 0
 
+            # Get created date from item (not from stats)
+            created = item.get('created', 'Unknown')
+
             # Add to packages dict with stats
-            # Use a dict to deduplicate: {(package, version): (last_downloaded, download_count)}
+            # Use a dict to deduplicate: {(package, version): (created, last_downloaded, download_count)}
             # Keep the entry with the highest download count
             if package_name not in packages:
                 packages[package_name] = {}
 
             # Deduplicate: if version exists, keep the one with more downloads
             if version in packages[package_name]:
-                existing_dl, existing_count = packages[package_name][version]
+                existing_created, existing_dl, existing_count = packages[package_name][version]
                 # Keep the entry with higher download count, or if equal, the one with a real download date
                 if download_count > existing_count or (download_count == existing_count and last_downloaded != 'Never' and existing_dl == 'Never'):
-                    packages[package_name][version] = (last_downloaded, download_count)
+                    packages[package_name][version] = (created, last_downloaded, download_count)
             else:
-                packages[package_name][version] = (last_downloaded, download_count)
+                packages[package_name][version] = (created, last_downloaded, download_count)
         else:
             # Add to packages dict without stats
             if package_name not in packages:
@@ -427,7 +430,7 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
 
     parser.add_argument(
         '--csv-output',
-        help='Output CSV file with download statistics (package, version, package_version, last_downloaded, download_count)'
+        help='Output CSV file with download statistics (package, version, package_version, created, last_downloaded, download_count)'
     )
 
     args = parser.parse_args()
@@ -490,14 +493,14 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
         try:
             with open(args.csv_output, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow(['package', 'version', 'package_version', 'last_downloaded', 'download_count'])
+                writer.writerow(['package', 'version', 'package_version', 'created', 'last_downloaded', 'download_count'])
 
                 csv_rows = []
                 for package_name in sorted(packages.keys()):
-                    version_stats = packages[package_name]  # Dict of {version: (last_downloaded, download_count)}
-                    for version, (last_downloaded, download_count) in version_stats.items():
+                    version_stats = packages[package_name]  # Dict of {version: (created, last_downloaded, download_count)}
+                    for version, (created, last_downloaded, download_count) in version_stats.items():
                         package_version = f"{package_name}@{version}"
-                        csv_rows.append([package_name, version, package_version, last_downloaded, download_count])
+                        csv_rows.append([package_name, version, package_version, created, last_downloaded, download_count])
 
                 # Sort by package, then version
                 csv_rows.sort(key=lambda x: (x[0], x[1]))
