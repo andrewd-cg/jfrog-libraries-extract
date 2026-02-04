@@ -148,33 +148,42 @@ def parse_npm_metadata(path: str, filename: str) -> Tuple[str, str]:
             # Unscoped package: .npm/{package}/
             package_name = path_parts[1]
     else:
-        # Content-addressable format: {hash}/{hash}/{package}/-/
-        # Find the package name (it's the part before '/-/')
-        if '/-' in path or (len(path_parts) >= 3 and path_parts[-1] == '-'):
-            # Package name is 3rd path component
-            package_name_candidate = path_parts[2] if len(path_parts) >= 3 else None
-            if not package_name_candidate:
-                return None, None
+        # Content-addressable format: {hash}/{hash}/{package}/-/ OR {hash}/{hash}/-/
+        # In some cases, JFrog stores tarballs as {hash}/{hash}/-/{package}-{version}.tgz
+        # without the package name in the path, so we need to extract it from the filename
 
-            # Check if it's a scoped package (starts with @)
-            if package_name_candidate.startswith('@'):
-                # Scoped package: hash/hash/@scope/package/-/
-                if len(path_parts) >= 4:
-                    scope = path_parts[2]  # @scope
-                    package_name_from_path = path_parts[3]  # package (before -/)
-                    package_name = f"{scope}/{package_name_from_path}"
-                else:
-                    return None, None
-            else:
-                # Unscoped package
-                package_name = package_name_candidate
-        else:
+        # First, try to extract version from filename to get the package name
+        match = re.match(r'^(.+?)-(\d+[\d\.\-\w]*)$', name_without_ext)
+        if not match:
             return None, None
 
-    # Extract version from filename: {package}-{version}
-    # Handle both unscoped and scoped packages
-    # For scoped packages, filename is @scope-package-version, but we need just the version
+        package_name_from_filename = match.group(1)
+        version = match.group(2)
 
+        # Validate version looks reasonable
+        if not (version and version[0].isdigit()):
+            return None, None
+
+        # Convert package name from filename format to proper npm format
+        # Filenames use: @scope-package -> @scope/package
+        if package_name_from_filename.startswith('@'):
+            # Scoped package: @scope-package -> @scope/package
+            # Find the first hyphen after @
+            parts = package_name_from_filename.split('-', 1)
+            if len(parts) == 2:
+                scope = parts[0]  # @scope
+                package_name_part = parts[1]  # package
+                package_name = f"{scope}/{package_name_part}"
+            else:
+                # Malformed scoped package
+                return None, None
+        else:
+            # Unscoped package
+            package_name = package_name_from_filename
+
+        return package_name, version
+
+    # For .npm metadata paths, extract version from filename
     # Try to match: {anything}-{version} where version starts with digit
     match = re.match(r'^(.+?)-(\d+[\d\.\-\w]*)$', name_without_ext)
     if match:
