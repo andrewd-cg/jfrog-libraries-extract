@@ -148,40 +148,62 @@ def parse_npm_metadata(path: str, filename: str) -> Tuple[str, str]:
             # Unscoped package: .npm/{package}/
             package_name = path_parts[1]
     else:
-        # Content-addressable format: {hash}/{hash}/{package}/-/ OR {hash}/{hash}/-/
-        # In some cases, JFrog stores tarballs as {hash}/{hash}/-/{package}-{version}.tgz
-        # without the package name in the path, so we need to extract it from the filename
+        # Content-addressable format:
+        # Format A: {hash}/{hash}/@scope/package/-/{filename}.tgz (scoped with path)
+        # Format B: {hash}/{hash}/package/-/{filename}.tgz (unscoped with path)
+        # Format C: {hash}/{hash}/-/{filename}.tgz (package name only in filename)
 
-        # First, try to extract version from filename to get the package name
-        match = re.match(r'^(.+?)-(\d+[\d\.\-\w]*)$', name_without_ext)
-        if not match:
-            return None, None
-
-        package_name_from_filename = match.group(1)
-        version = match.group(2)
-
-        # Validate version looks reasonable
-        if not (version and version[0].isdigit()):
-            return None, None
-
-        # Convert package name from filename format to proper npm format
-        # Filenames use: @scope-package -> @scope/package
-        if package_name_from_filename.startswith('@'):
-            # Scoped package: @scope-package -> @scope/package
-            # Find the first hyphen after @
-            parts = package_name_from_filename.split('-', 1)
-            if len(parts) == 2:
-                scope = parts[0]  # @scope
-                package_name_part = parts[1]  # package
-                package_name = f"{scope}/{package_name_part}"
+        # First, try to extract package name from PATH (Formats A & B)
+        # Check if path contains package structure: {hash}/{hash}/{package}/-/
+        # For scoped: ['hash', 'hash', '@scope', 'package', '-']
+        # For unscoped: ['hash', 'hash', 'package', '-']
+        if len(path_parts) >= 4 and path_parts[-1] == '-':
+            # Package name is in the path
+            if path_parts[2].startswith('@'):
+                # Scoped package: hash/hash/@scope/package/-/
+                scope = path_parts[2]  # @scope
+                package_name_from_path = path_parts[3]  # package
+                package_name = f"{scope}/{package_name_from_path}"
             else:
-                # Malformed scoped package
-                return None, None
-        else:
-            # Unscoped package
-            package_name = package_name_from_filename
+                # Unscoped package: hash/hash/package/-/
+                package_name = path_parts[2]
 
-        return package_name, version
+            # Extract version from filename
+            match = re.match(r'^(.+?)-(\d+[\d\.\-\w]*)$', name_without_ext)
+            if match:
+                version = match.group(2)
+                if version and version[0].isdigit():
+                    return package_name, version
+            return None, None
+        else:
+            # Format C: Package name NOT in path, extract from filename
+            match = re.match(r'^(.+?)-(\d+[\d\.\-\w]*)$', name_without_ext)
+            if not match:
+                return None, None
+
+            package_name_from_filename = match.group(1)
+            version = match.group(2)
+
+            # Validate version looks reasonable
+            if not (version and version[0].isdigit()):
+                return None, None
+
+            # Convert package name from filename format to proper npm format
+            # Filenames use: @scope-package -> @scope/package
+            if package_name_from_filename.startswith('@'):
+                # Scoped package: @scope-package -> @scope/package
+                parts = package_name_from_filename.split('-', 1)
+                if len(parts) == 2:
+                    scope = parts[0]  # @scope
+                    package_name_part = parts[1]  # package
+                    package_name = f"{scope}/{package_name_part}"
+                else:
+                    return None, None
+            else:
+                # Unscoped package
+                package_name = package_name_from_filename
+
+            return package_name, version
 
     # For .npm metadata paths, extract version from filename
     # Try to match: {anything}-{version} where version starts with digit
@@ -286,6 +308,7 @@ def get_cached_npm_packages(base_url: str, repo_name: str, auth: Tuple[str, str]
 
         # Extract stats if requested
         if include_stats:
+            # JFrog returns 'stats' (plural) as an array when requesting stat fields
             stats = item.get('stats', [])
             last_downloaded = stats[0].get('downloaded', 'Never') if stats else 'Never'
             download_count = stats[0].get('downloads', 0) if stats else 0
