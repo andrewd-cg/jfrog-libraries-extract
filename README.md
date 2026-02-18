@@ -226,6 +226,11 @@ lodash,4.17.21,lodash@4.17.21,2025-12-12T09:22:10.789Z,2025-12-17T14:22:33.789Z,
 - JFrog stores npm packages in multiple formats (tarball + metadata). The script automatically deduplicates entries, keeping the one with the most downloads.
 - `created` shows when the artifact was first uploaded to JFrog (artifact creation date)
 - `last_downloaded` shows when the artifact was most recently downloaded from JFrog
+- The script supports multiple JFrog storage path formats:
+  - Metadata: `.npm/{package}/` or `.npm/@scope/package/`
+  - Content-addressable (5-part): `{hash}/{hash}/@scope/package/-/`
+  - Content-addressable (4-part): `{repo}/@scope/package/-/`
+  - Filename-only: `{hash}/{hash}/-/{package}-{version}.tgz`
 
 ### Options
 
