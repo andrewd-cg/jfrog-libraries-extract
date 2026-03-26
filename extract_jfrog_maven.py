@@ -225,11 +225,18 @@ def get_cached_maven_packages(base_url: str, repo_name: str, auth: Tuple[str, st
             last_downloaded = stats[0].get('downloaded', 'Never') if stats else 'Never'
             download_count = stats[0].get('downloads', 0) if stats else 0
 
-            # Add to packages dict with stats
+            # Aggregate per (group_id, artifact_id, version): sum downloads, keep latest download date
             key = (group_id, artifact_id)
             if key not in packages:
-                packages[key] = []
-            packages[key].append((version, last_downloaded, download_count))
+                packages[key] = {}
+            if version not in packages[key]:
+                packages[key][version] = [version, last_downloaded, download_count]
+            else:
+                existing = packages[key][version]
+                existing[2] += download_count
+                if last_downloaded != 'Never':
+                    if existing[1] == 'Never' or last_downloaded > existing[1]:
+                        existing[1] = last_downloaded
         else:
             # Add to packages dict without stats
             key = (group_id, artifact_id)
@@ -373,8 +380,8 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
 
                 csv_rows = []
                 for (group_id, artifact_id) in sorted(packages.keys()):
-                    version_stats = packages[(group_id, artifact_id)]  # List of (version, last_downloaded, download_count) tuples
-                    for version, last_downloaded, download_count in version_stats:
+                    version_stats = packages[(group_id, artifact_id)]  # Dict of version -> [version, last_downloaded, download_count]
+                    for version, last_downloaded, download_count in version_stats.values():
                         package_version = f"{group_id}:{artifact_id}:{version}"
                         csv_rows.append([group_id, artifact_id, version, package_version, last_downloaded, download_count])
 
@@ -403,17 +410,15 @@ Note: This script queries ONLY cached artifacts in JFrog, not the upstream repos
 
             # Handle both data structures: set of strings or list of tuples
             if include_stats:
-                # Extract versions from tuples (version, last_downloaded, download_count)
+                # Extract versions from aggregated dict (version -> [version, last_downloaded, download_count])
                 # Apply date filter if needed
                 if cutoff_date_str:
-                    # Filter by date for text output
-                    filtered_versions = [
-                        (v, dl, dc) for v, dl, dc in version_data
+                    versions = {
+                        v for v, dl, dc in version_data.values()
                         if dl != 'Never' and dl >= cutoff_date_str
-                    ]
-                    versions = set(v[0] for v in filtered_versions)
+                    }
                 else:
-                    versions = set(v[0] for v in version_data)
+                    versions = set(version_data.keys())
             else:
                 versions = version_data
 
