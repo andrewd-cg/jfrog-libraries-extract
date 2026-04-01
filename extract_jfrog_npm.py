@@ -158,23 +158,27 @@ def parse_npm_metadata(path: str, filename: str) -> Tuple[str, str]:
         # 5-part scoped: ['hash', 'hash', '@scope', 'package', '-']
         # 4-part scoped: ['node-cache', '@scope', 'package', '-']
         # Unscoped: ['hash', 'hash', 'package', '-'] or ['repo', 'package', '-']
-        if len(path_parts) >= 4 and path_parts[-1] == '-':
+        if len(path_parts) >= 3 and path_parts[-1] == '-':
             # Package name is in the path
-            # Check for scoped packages - scope might be at position 1 or 2
+            # Check for scoped packages - scope might be at various positions
             if len(path_parts) >= 5 and path_parts[2].startswith('@'):
                 # 5-part scoped: hash/hash/@scope/package/-/
                 scope = path_parts[2]  # @scope
                 package_name_from_path = path_parts[3]  # package
                 package_name = f"{scope}/{package_name_from_path}"
-            elif len(path_parts) == 4 and path_parts[1].startswith('@'):
+            elif len(path_parts) >= 4 and path_parts[1].startswith('@'):
                 # 4-part scoped: node-cache/@scope/package/-/
                 scope = path_parts[1]  # @scope
                 package_name_from_path = path_parts[2]  # package
                 package_name = f"{scope}/{package_name_from_path}"
+            elif len(path_parts) == 3 and path_parts[0].startswith('@'):
+                # 3-part scoped: @scope/package/-/
+                scope = path_parts[0]  # @scope
+                package_name_from_path = path_parts[1]  # package
+                package_name = f"{scope}/{package_name_from_path}"
             else:
                 # Unscoped package: use the part before '-'
-                # Could be position 1 or 2 depending on path length
-                package_name = path_parts[-2] if len(path_parts) >= 3 else path_parts[2]
+                package_name = path_parts[-2]
 
             # Extract version from filename
             match = re.match(r'^(.+?)-(\d+[\d\.\-\w]*)$', name_without_ext)
