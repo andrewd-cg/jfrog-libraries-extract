@@ -99,6 +99,30 @@ def get_actual_repo_name(base_url: str, repo_name: str, auth: Tuple[str, str] = 
     return repo_name
 
 
+def _extract_version(name_without_ext: str, package_name: str) -> str:
+    """
+    Extract version from a tarball/metadata filename given the known package name.
+
+    Uses the package name as a prefix to avoid mis-splitting on digit-suffixed
+    package names like apidom-ns-json-schema-draft-6 (where the lazy regex would
+    produce version "6-1.0.0" instead of "1.0.0").
+    """
+    short_name = package_name.split('/')[-1]
+    for prefix_name in [short_name, package_name.replace('/', '-')]:
+        prefix = prefix_name + '-'
+        if name_without_ext.startswith(prefix):
+            version = name_without_ext[len(prefix):]
+            if version and version[0].isdigit():
+                return version
+    # Fallback: regex (handles edge cases not covered by prefix match)
+    match = re.match(r'^(.+?)-(\d+[\d\.\-\w]*)$', name_without_ext)
+    if match:
+        version = match.group(2)
+        if version and version[0].isdigit():
+            return version
+    return None
+
+
 def parse_npm_metadata(path: str, filename: str) -> Tuple[str, str]:
     """
     Extract package name and version from npm files in JFrog.
@@ -177,11 +201,9 @@ def parse_npm_metadata(path: str, filename: str) -> Tuple[str, str]:
                 package_name = path_parts[-2] if len(path_parts) >= 3 else path_parts[2]
 
             # Extract version from filename
-            match = re.match(r'^(.+?)-(\d+[\d\.\-\w]*)$', name_without_ext)
-            if match:
-                version = match.group(2)
-                if version and version[0].isdigit():
-                    return package_name, version
+            version = _extract_version(name_without_ext, package_name)
+            if version:
+                return package_name, version
             return None, None
         else:
             # Format C: Package name NOT in path, extract from filename
@@ -214,13 +236,9 @@ def parse_npm_metadata(path: str, filename: str) -> Tuple[str, str]:
             return package_name, version
 
     # For .npm metadata paths, extract version from filename
-    # Try to match: {anything}-{version} where version starts with digit
-    match = re.match(r'^(.+?)-(\d+[\d\.\-\w]*)$', name_without_ext)
-    if match:
-        version = match.group(2)
-        # Validate version looks reasonable
-        if version and version[0].isdigit():
-            return package_name, version
+    version = _extract_version(name_without_ext, package_name)
+    if version:
+        return package_name, version
 
     return None, None
 
